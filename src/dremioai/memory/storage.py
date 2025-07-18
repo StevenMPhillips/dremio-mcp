@@ -24,10 +24,10 @@ import re
 from dataclasses import dataclass
 from dremioai.config import settings
 from dremioai.log import logger
-from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import pickle
 import json
+from dremioai.memory.embeddings import create_embedding_service, EmbeddingService
 
 
 @dataclass
@@ -41,8 +41,8 @@ class MemoryMatch:
 
 class MemoryStorage:
     """
-    Memory storage using DuckDB with TF-IDF vector similarity search.
-    Uses scikit-learn's TfidfVectorizer for proper semantic search.
+    Memory storage using DuckDB with configurable embedding services.
+    Supports both TF-IDF and OpenAI embeddings for semantic search.
     """
 
     def __init__(self, db_path: Optional[str] = None):
@@ -53,14 +53,8 @@ class MemoryStorage:
         self.db_path = Path(db_path or self.config.db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Initialize TF-IDF vectorizer
-        self.vectorizer = TfidfVectorizer(
-            max_features=1000,  # Limit vocabulary size
-            stop_words='english',
-            ngram_range=(1, 2),  # Include unigrams and bigrams
-            lowercase=True,
-            strip_accents='ascii'
-        )
+        # Initialize embedding service based on configuration
+        self.embedding_service = create_embedding_service(self.config)
         self._vectors_cache = None
         self._texts_cache = None
         self._ids_cache = None
@@ -132,16 +126,16 @@ class MemoryStorage:
 
             logger().info(f"Migrating {len(result)} memories to add vectors...")
 
-            # First, fit the vectorizer on all existing texts
+            # First, fit the embedding service on all existing texts
             all_texts = [text for _, text in result]
             if all_texts:
-                self.vectorizer.fit(all_texts)
+                self.embedding_service.fit(all_texts)
 
             # Generate and store vectors for each memory
             for memory_id, text in result:
                 try:
-                    vector = self.vectorizer.transform([text])[0]
-                    vector_list = vector.toarray().flatten().tolist() if hasattr(vector, 'toarray') else vector.flatten().tolist()
+                    vector = self.embedding_service.embed_text(text)
+                    vector_list = vector.tolist() if hasattr(vector, 'tolist') else vector.flatten().tolist()
 
                     conn.execute("""
                         UPDATE mem SET vector = ? WHERE id = ?
@@ -155,6 +149,23 @@ class MemoryStorage:
 
         except Exception as e:
             logger().error(f"Error during memory migration: {e}")
+        finally:
+            conn.close()
+
+    def force_remigration(self):
+        """Force re-migration of all memories (useful when changing embedding types)."""
+        conn = duckdb.connect(str(self.db_path))
+        try:
+            # Clear all existing vectors
+            conn.execute("UPDATE mem SET vector = NULL")
+            conn.commit()
+            logger().info("Cleared all existing vectors")
+
+            # Trigger migration
+            self._migrate_existing_memories()
+
+        except Exception as e:
+            logger().error(f"Error during forced remigration: {e}")
         finally:
             conn.close()
 
@@ -175,10 +186,12 @@ class MemoryStorage:
             self._ids_cache = list(ids)
             self._texts_cache = list(texts)
 
-            # Fit vectorizer and transform texts
-            self._vectors_cache = self.vectorizer.fit_transform(texts)
+            # Fit embedding service and generate embeddings
+            self.embedding_service.fit(texts)
+            embeddings = self.embedding_service.embed_texts(texts)
+            self._vectors_cache = embeddings
 
-            logger().info(f"Rebuilt vector cache with {len(texts)} memories")
+            logger().info(f"Rebuilt vector cache with {len(texts)} memories using {type(self.embedding_service).__name__}")
 
         finally:
             conn.close()
@@ -188,18 +201,13 @@ class MemoryStorage:
         if self._vectors_cache is None:
             self._rebuild_vector_cache()
 
-    def _generate_vector(self, text: str):
-        """Generate a vector for a single text using the fitted vectorizer."""
-        # Ensure we have a fitted vectorizer
+    def _generate_vector(self, text: str) -> np.ndarray:
+        """Generate a vector for a single text using the embedding service."""
+        # Ensure we have a fitted embedding service
         self._ensure_vector_cache()
 
-        if self._vectors_cache is None:
-            # If no existing data, fit on this single text
-            self._vectors_cache = self.vectorizer.fit_transform([text])
-            return self._vectors_cache[0]
-        else:
-            # Transform using existing fitted vectorizer
-            return self.vectorizer.transform([text])[0]
+        # Generate embedding for the text
+        return self.embedding_service.embed_text(text)
     
     def put_memory(self, text: str, id: Optional[str] = None, tags: Optional[List[str]] = None) -> Dict[str, Any]:
         """
@@ -221,7 +229,7 @@ class MemoryStorage:
         
         # Generate vector for the text
         vector = self._generate_vector(text)
-        vector_list = vector.toarray().flatten().tolist() if hasattr(vector, 'toarray') else vector.flatten().tolist()
+        vector_list = vector.tolist() if hasattr(vector, 'tolist') else vector.flatten().tolist()
 
         conn = duckdb.connect(str(self.db_path))
         try:
@@ -246,7 +254,7 @@ class MemoryStorage:
             return {
                 "id": id,
                 "tokens_est": tokens_est,
-                "embedding_dim": len(vector_list),
+                "embedding_dim": self.embedding_service.get_dimension(),
                 "stored": True
             }
         finally:
@@ -259,10 +267,6 @@ class MemoryStorage:
         """
         # Generate query vector
         query_vector = self._generate_vector(query)
-        if hasattr(query_vector, 'toarray'):
-            query_vector = query_vector.toarray().flatten()
-        else:
-            query_vector = query_vector.flatten()
 
         # Get all memories with vectors from database
         conn = duckdb.connect(str(self.db_path))
@@ -293,8 +297,8 @@ class MemoryStorage:
                 # Convert stored vector to numpy array
                 stored_vector = np.array(stored_vector)
 
-                # Calculate cosine similarity
-                similarity = cosine_similarity([query_vector], [stored_vector])[0][0]
+                # Calculate cosine similarity using embedding service
+                similarity = self.embedding_service.calculate_similarity(query_vector, stored_vector.reshape(1, -1))[0]
                 scored_results.append((memory_id, float(similarity)))
 
             # Sort by similarity descending
@@ -390,7 +394,7 @@ class MemoryStorage:
 
             return {
                 "matches": matches,
-                "query_embedding_dim": self.config.embedding_dim
+                "query_embedding_dim": self.embedding_service.get_dimension()
             }
         finally:
             conn.close()

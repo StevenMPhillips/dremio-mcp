@@ -214,8 +214,11 @@ class Anthropic(BaseModel):
 
 class Memory(BaseModel):
     db_path: Optional[str] = Field(default="~/.config/dremioai/memory.db")
-    embedding_model: Optional[str] = Field(default="all-MiniLM-L6-v2")
-    embedding_dim: Optional[int] = Field(default=384)
+    embedding_type: Optional[str] = Field(default="tfidf")  # "tfidf" or "openai"
+    embedding_model: Optional[str] = Field(default="all-MiniLM-L6-v2")  # For sentence transformers
+    openai_model: Optional[str] = Field(default="text-embedding-3-small")  # For OpenAI
+    openai_api_key: Optional[str] = Field(default=None)
+    embedding_dim: Optional[int] = Field(default=384)  # Will be auto-detected
     max_preview_chars: Optional[int] = Field(default=240)
     model_config = ConfigDict(validate_assignment=True)
 
