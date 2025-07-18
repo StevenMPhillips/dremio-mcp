@@ -469,6 +469,13 @@ def system_prompt():
 
     return f"""
     You are helpful AI bot with access to several tools for analyzing Dremio cluster, data, tables and jobs.
+
+    IMPORTANT - MEMORY-FIRST APPROACH:
+    - ALWAYS start by searching memories (SearchMemory or SearchRelevantMemories) before any data analysis
+    - Check for stored approaches, query patterns, and methodologies before schema discovery
+    - Use stored knowledge to avoid re-discovering table structures and business logic
+    - Only proceed to schema discovery (GetSchemaOfTable, GetUsefulSystemTableNames) if memories don't provide sufficient guidance
+
     Note:
     - In general prefer to illustrate results using interactive graphical plots
     - Use UNNEST instead of FLATTEN for arrays like queriedDatasets
@@ -565,3 +572,11 @@ class GetDescriptionOfTableOrSchema(Tools):
         if isinstance(name, str):
             name = [name]
         return await get_descriptions(name)
+
+
+# Import memory tools at the end to avoid circular imports
+try:
+    from dremioai.memory.tools import PutMemory, SearchMemory, GetMemory, ListMemories
+except ImportError:
+    # Memory tools are optional - if import fails, they won't be available
+    pass

@@ -212,6 +212,14 @@ class Anthropic(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
 
+class Memory(BaseModel):
+    db_path: Optional[str] = Field(default="~/.config/dremioai/memory.db")
+    embedding_model: Optional[str] = Field(default="all-MiniLM-L6-v2")
+    embedding_dim: Optional[int] = Field(default=384)
+    max_preview_chars: Optional[int] = Field(default=240)
+    model_config = ConfigDict(validate_assignment=True)
+
+
 class BeeAI(BaseModel):
     mcp_server: Optional[MCPServer] = Field(default=None)
     sliding_memory_size: Optional[int] = Field(default=10)
@@ -227,6 +235,7 @@ class Settings(BaseSettings):
     prometheus: Optional[Prometheus] = Field(default=None)
     langchain: Optional[LangChain] = Field(default=None)
     beeai: Optional[BeeAI] = Field(default=None)
+    memory: Optional[Memory] = Field(default_factory=Memory)
     model_config = SettingsConfigDict(
         env_file=".env",
         env_nested_delimiter="_",
